@@ -1,0 +1,398 @@
+import openai
+import json
+import re
+import string
+from datetime import datetime
+
+# ========== 參數與初始化 ==========
+TXT_INPUT_FILE = "/content/transcription_zh.txt"   # 每行：數字[TAB]文本
+OUT_JSON = "multi_txt_results.json"
+OUT_TEXT2 = "text2_zh.txt"
+OUT_WRONG = "wrong_json.txt"
+
+API_KEY = "My API Key"
+client = openai.OpenAI(api_key=API_KEY)
+
+# ====== 規則定義 ======
+REMOVE_WORDS = {"around", "about", "approximately"}
+FAMILY_WORDS = {"dad", "mom", "father", "mother", "sister", "brother", "grandpa", "grandma", "aunt", "uncle", "son", "daughter"}
+
+def build_prompt(full_text):
+    escaped_text = full_text.replace('"', '\\"')
+    return f"""You must strictly follow the instructions and output only the JSON format.
+# CRITICAL RULE (Must be followed):
+1. When a longer phrase (e.g., "Ivan's dad") includes a shorter one (e.g., "Ivan"), follow this rule carefully:
+- ✅ If the shorter phrase refers to a different individual than the longer phrase, classify both separately.
+- ✅ If the shorter phrase is simply a substring referring to the same individual, classify only the longest semantically meaningful phrase.
+- ❌ DO NOT classify substrings that refer to the same person separately.
+
+2. The phrase must explicitly include a person's name to qualify under "familyname". Do NOT classify phrases like "my mom", "his dad", or "her brother" unless they include a name (e.g., "his brother Tom").
+
+3. Example:
+Input: "Ivan's dad joined the session with Ivan."
+- familyname: ["Ivan's dad"]
+- personalname: ["Ivan"]
+Input: "They talked with Ivan's dad."
+❌ Wrong: "familyname": ["Ivan's dad"], "personalname": ["Ivan"]
+✅ Correct: "familyname": ["Ivan's dad"], "personalname": []
+
+4. Place names should be tagged only when they provide identifying information.
+✅ Tag locations when they are part of:
+- an address
+- hospital/facility location
+- patient residence
+- official titles (e.g., "Archbishop of Canterbury")
+- roles tied to geographic origin or jurisdiction (e.g., "Duke of York")
+❌ Do NOT tag locations mentioned purely as general context or background, such as:
+- “I once visited Geneva”
+- “She lives somewhere in Asia”
+
+5. Only tag professions when they include a person's name.
+You must not tag professions like "doctor", "psychiatrist", "nurse", or "therapist" if they are mentioned without a specific person’s name.
+Generic references to roles should not be classified, even if the role is clear or mentioned multiple times.
+- Example:
+Do not tag: "my psychiatrist", "a doctor", "he's a GP", "she is a nurse", "the psychiatrist here in this department"
+Only tag when a name is explicitly present,
+
+6. "last night", "tonight", "this morning", etc., must classify `time`.
+
+7. Special Case: Season Words ("spring", "summer", etc.)
+- If the word is used to express a **feeling, weather, or atmosphere**, not a concrete calendar period, classify as `"duration"`.
+- Example: "It felt like spring." → duration: ["spring"]
+- Do NOT classify such cases as `"date"` unless a specific calendar-based event is mentioned.
+
+8. Do classify phrases like "morning", "evening", "last night" as `time`, even if used in greetings like "Good morning" or general conversation, not "date".
+
+9. Do NOT classify vague phrases like "last time", "a while ago", or "before" as date unless they refer to a clear calendar time (e.g., "last Friday", "May 10th").
+
+10. Carefully read the text and extract **all** recurring expressions (e.g., "every day", "every morning").
+- You MUST classify every recurring time expression as "set", even if it appears only once in the sentence. Do NOT skip these even if they seem casual or obvious.
+
+11. The word “Now" should be annotated when used in a temporal sense.
+- Examples:
+✅We need to act now. → Here, now should be annotated as it emphasizes the present moment.
+❌Now, don’t look at me. I already informed the manager about the issue. → Here, now is used for emphasism, rather than indicating time, so it should not be annotated.
+
+12. The word "time" should be annotated when it refers to time. It should not be annotated when "time" refers to a situation, occasion, or frequency.
+- ❌Not annotated: When "time" refers to a situation, occasion, or number of occurrences :
+• Each side is hoping this time it will make a difference.
+• At the same time
+- ✅Annotated: When "time" explicitly refers to time :
+• You felt calm within a very short time. → DURATION
+
+13. Profession includes religious roles such as "Archbishop", "Bishop", "Pastor", "Rabbi", and "Imam", when used as standalone job titles or with associated regions (e.g., "Archbishop of Canterbury"), ❌ Do NOT annotate titles such as "Pope", "King", or other religious or royal roles unless they are commonly treated as professions in the dataset.
+
+14. - Only classify as "profession" when the phrase is a specific job title (e.g., "teacher", "cashier").
+- Do NOT classify education levels or background (e.g., "college education", "MBA") as profession.
+- Do NOT classify workplaces (e.g., "sandwich shop", "hospital") unless paired with a job title.
+- Do NOT classify phrases that only describe where someone works without naming their job.
+
+15. Example:
+"I went up to Wesley Tuesday to hear a talk."
+→ "Wesley" = organization (context includes "campus", "classmates", "professors")
+"We stayed in Wesley for the weekend."
+→ "Wesley" = location-other (used as a geographic location)
+
+16. If a phrase contains multiple types of SHI, break it into multiple labeled components.
+- Example:
+Input: “a subway manager”
+Output:
+ORGANIZATION a subway
+PROFESSION manager
+
+17. Example: Do not mark acronyms like "WHO" as ORGANIZATION if they appear only as modifiers in standard terminologies, such as:
+“WHO grade 4”
+“WHO classification”
+
+18. Example:
+Sentence: "Documents a liver resection performed at St. George Private under the Hunter New England Mental Health Service."
+→ Correct labels:
+  - HOSPITAL: Hunter New England Mental Health Service
+  - DEPARTMENT: St. George Private
+
+19. Ignore standard professional terms unless used as a metaphor, slang, or nickname by the speaker.
+
+20. College **majors** (e.g., "nursing", "biology", "engineering") are considered professions **only if clearly stated as a field of study**.
+- Do NOT classify vague education references like "college education", "degree", or "studied in college" as professions.
+- Do NOT classify "college" or "school" alone as professions.
+
+21. Label as DEPARTMENT if the name refers to a medical specialty or service unit (e.g., Pathology, Radiology, Emergency Department), especially when it appears in the context of reports, test results, or internal hospital functions. Even if the name includes external provider branding (e.g., "Pathology West"), it should still be labeled DEPARTMENT if it acts as a hospital service unit.
+---
+
+You are an AI assistant tasked with extracting sensitive health information (SHI) from the following text and categorizing it into the following categories:
+When deciding whether a word or phrase should be labeled as Sensitive Health Information (SHI), you must always consider the surrounding context. Do not rely solely on the surface form of the word.
+#### Name-related:
+- "patient": Patient names (e.g., "Mr. Lee", "Ramona")
+- "doctor": Doctor names (e.g., "Dr. John Smith")
+- "username": Usernames in systems (e.g., "user123")
+- "familyname": The patient's immediate family members, spouse, and children. (e.g., "his brother Tom")
+- "personalname": Other names that have no blood relation to the patient. (e.g., "Tom", "Alice")
+
+#### Profession:
+- "profession": Job titles or professions (e.g., "teacher")
+
+#### Location-related:
+- "room": Room numbers (e.g., "Room 302")
+- "department": Use this label for any named division, unit, private practice, or sub-entity that exists **within** or **under the control** of a hospital or regional healthcare system. (e.g., "Cardiology")
+- "hospital": Only use this label if the name refers to a standalone medical institution, such as a hospital, medical center, or healthcare provider that performs procedures or admissions as the main entity (e.g., "Taipei Veterans General Hospital")
+- "organization": Non-hospital organizations (e.g., "Bank of America")
+- "street": Streets or addresses (e.g., "123 Main St.")
+- "city": Cities (e.g., "Chicago")
+- "district": Districts (e.g., "Sanmin District")
+- "county": Counties (e.g., "Cheshire")
+- "state": States (e.g., "California", "Rhode Island")
+- "country": Countries (e.g., "India", "Madagascar")
+- "zip": Postal or ZIP codes (e.g., "1138")
+- "location-other": Other location references (e.g., "Canterbury", "Mystic")
+
+#### Age and Time:
+In this category, any kind of temporal expression within the text should be annotated.
+- "age": Age or age range expressions (e.g.,"69-year-old", "in his 20s")
+🔺Only annotate age when a specific age, numeric range, or clearly identifiable life stage (e.g., "infant", "teenager", "elderly") is mentioned in a medical or health-related context.
+❌Do NOT annotate vague age impressions like "younger", "older", "child", "woman", or "girl" unless tied to a specific numeric age or clear medical reference.
+- "date": Specific dates or periods of time on the calendar (e.g., "2023-12-25", "May 10th", **"Now"**, **"today"**, **"this weekend"**, **"in spring"**)
+🔺 Includes both explicit and relative time points indicating a calendar-based reference.
+✅ Include relative date phrases that point to a specific calendar time, such as "this weekend", "next week", "this Friday".
+- "time": Clock time or part of day (e.g., "3 PM", "morning", "at night", "around two", "last night")
+Must classify "morning", "night" in time.
+- "duration": Length or span of time (e.g., "two hours")
+🔺 Do NOT classify generic expressions of change or personal growth (e.g., "over time", "with time", "eventually") as duration unless clearly linked to a medical event or treatment.
+✅ Only classify as "duration" if the phrase refers to a concrete span of time related to health, treatment, symptoms, or events (e.g., "for three days", "lasting two weeks").
+- "set": Recurring or periodic time expressions (e.g., "every Monday", "every day", "each morning", "daily", "once a week", "every 3 hours").
+✅ These describe repeated schedules or habits, not a single point in time.
+
+#### Contact information:
+- "phone": Phone numbers
+- "fax": Fax numbers
+- "email": Email addresses
+- "url": Website URLs
+- "ipaddress": IP addresses
+
+#### Identifiers:
+- "social_security_number": Social Security Numbers
+- "medical_record_number": Medical Record Numbers
+- "health_plan_number": Health Plan Numbers
+- "account_number": Bank or system account numbers
+- "license_number": License or certificate numbers
+- "vehicle_id": Vehicle plate or registration numbers
+- "device_id": Medical or system device IDs
+- "biometric_id": Biometric identifiers
+- "id_number": Other general ID numbers
+
+#### Other:
+- "other": Any data that would potentially help in identifying a patient but is not included in the categories above should be marked as other.The examples of this category include the finger prints, or a company logo etc.
+
+---
+
+### Output Instructions:
+
+1. Carefully read the provided text.
+2. Extract and categorize all SHI based on meaning and context.
+3. Follow the critical rule: longer meaningful phrases take priority, substrings must be ignored if already included in a longer classified phrase.
+4. Return your result strictly in this JSON format:
+
+```json
+{{
+    "text": "{escaped_text}",
+    "patient": [], "doctor": [], "username": [], "familyname": [], "personalname": [], "profession": [],
+    "room": [], "department": [], "hospital": [], "organization": [], "street": [], "city": [], "district": [],
+    "county": [], "state": [], "country": [], "zip": [], "location-other": [],
+    "age": [], "date": [], "time": [], "duration": [], "set": [],
+    "phone": [], "fax": [], "email": [], "url": [], "ipaddress": [],
+    "social_security_number": [], "medical_record_number": [], "health_plan_number": [], "account_number": [],
+    "license_number": [], "vehicle_id": [], "device_id": [], "biometric_id": [], "id_number": [],
+    "other": []
+}}
+    """
+
+def call_openai(prompt):
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4.1",
+            messages=[
+                {"role": "system", "content": "You are an AI assistant tasked with extracting sensitive health information (SHI) from the following text and categorizing it into the following categories."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=2048,
+            temperature=0,
+            top_p=0.1,
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        print(f"❌ OpenAI 呼叫失敗：{e}")
+        return None
+
+def extract_json_from_output(generated_text):
+    if not isinstance(generated_text, str) or not generated_text.strip():
+        print("❌ extract_json_from_output: 輸入不是字串或為空")
+        return None
+    content = re.sub(r"^```json|^```|```$", "", generated_text.strip(), flags=re.MULTILINE)
+    try:
+        json_start = content.index('{')
+        json_end = content.rindex('}') + 1
+        content = content[json_start:json_end]
+    except ValueError:
+        pass
+    content = re.sub(r'("text"\s*:\s*")((?:[^"\\]|\\.)*)"', lambda m: m.group(1) + m.group(2).replace('\n', '\\n') + '"', content, flags=re.DOTALL)
+    content = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F]', '', content)
+    content = content.strip()
+    try:
+        return json.loads(content)
+    except Exception as e:
+        print(f"❌ JSON 解析失敗：{e}\n原始內容：\n{generated_text}")
+        return None
+
+# ====== 後處理規則 ======
+def clean_word(word):
+    word = word.strip().lower()
+    if word.endswith('.'):
+        word = word[:-1]
+    time_match = re.fullmatch(r'(\d{1,2})\.(\d{2})(am|pm)', word)
+    if time_match:
+        hour, minute, meridian = time_match.groups()
+        try:
+            t = datetime.strptime(f"{hour}:{minute} {meridian}", "%I:%M %p")
+            return t.strftime("%H:%M")
+        except ValueError:
+            pass
+    word = word.translate(str.maketrans('', '', string.punctuation))
+    return word
+
+def remove_punct(text):
+    return text.translate(str.maketrans('', '', string.punctuation))
+
+def filter_modifiers(phrase):
+    return " ".join([w for w in phrase.split() if w.lower() not in REMOVE_WORDS])
+
+def filter_family_words(phrase):
+    tokens = [w for w in phrase.split() if w.lower() not in FAMILY_WORDS]
+    tokens = [re.sub(r"('s|’s|s)$", "", w, flags=re.IGNORECASE) for w in tokens]
+    tokens = [w for w in tokens if w]
+    return " ".join(tokens)
+
+def remove_dr_prefix(phrase):
+    return re.sub(r'^(Dr\.?\s+|dr\.?\s+)', '', phrase).strip()
+
+def remove_title_prefix(phrase):
+    pattern = r'^(Dr\.?|Mr\.?|Ms\.?|Mrs\.?|Miss\.?|Prof\.?|Nurse\.?|Registrar\.?)\s+'
+    return re.sub(pattern, '', phrase, flags=re.IGNORECASE).strip()
+
+def remove_suffix(phrase):
+    pattern = r'\b(M\.?D\.?|R\.?N\.?|Ph\.?D\.?|M\.?S\.?N\.?|D\.?O\.?)\.?$'
+    return re.sub(pattern, '', phrase, flags=re.IGNORECASE).strip()
+
+def remove_possessive(phrase):
+    return re.sub(r"('s|’s|s')\b", '', phrase, flags=re.IGNORECASE).strip()
+
+def normalize_time_phrase(text, typ):
+    orig_typ = typ
+    text = text.strip()   # ⚠️ 拿掉 .lower()
+    # 以下判斷時用 .lower() 來判斷內容，但不要把 text 本身變小寫
+    if text.lower() == 'right now':
+        text = 'now'
+    text = re.sub(r'^(the|right now|right|in your|in his|he was|last|the last)\s+', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\s+ago$', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\s+of those$', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'^(an|a)\s+', '', text, flags=re.IGNORECASE)
+    text = text.strip()
+    if orig_typ == 'TIME' and text.lower() in ['an hour', 'a minute', 'a day', 'an evening', 'couple of days']:
+        typ = 'DURATION'
+    if orig_typ == 'AGE' and text.isdigit():
+        typ = 'AGE'
+    return text, typ
+
+def fix_date_phrase(phrase):
+    phrase = re.sub(r'(\d+)(st|nd|rd|th)\b', r'\1', phrase)
+    phrase = re.sub(
+        r'\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2})\s+(\d{4})\b',
+        r'\1 \2, \3',
+        phrase
+    )
+    return phrase
+
+def fix_time_phrase(phrase):
+    phrase_strip = phrase.replace(" ", "")
+    m = re.match(r'^(\d{1,4})(am|pm|AM|PM)$', phrase_strip, flags=re.IGNORECASE)
+    if m:
+        digits, meridian = m.group(1), m.group(2).upper()
+        if len(digits) in [3, 4]:
+            if len(digits) == 3:
+                hour = int(digits[0])
+                minute = digits[1:]
+            else:
+                hour = int(digits[:2])
+                minute = digits[2:]
+            try:
+                hour = int(hour)
+                minute = int(minute)
+                phrase = f"{hour:02d}:{minute:02d} {meridian}"
+            except Exception:
+                pass
+        elif len(digits) <= 2:
+            hour = int(digits)
+            phrase = f"{hour:02d}:00 {meridian}"
+    return phrase
+
+def process_txt_file(input_file):
+    with open(input_file, "r", encoding="utf-8") as fin, \
+         open(OUT_JSON, "w", encoding="utf-8") as f_json, \
+         open(OUT_TEXT2, "w", encoding="utf-8") as f2, \
+         open(OUT_WRONG, "w", encoding="utf-8") as wrong_json:
+
+        all_results = {}
+
+        for line in fin:
+            line = line.strip()
+            if not line:
+                continue
+            m = re.match(r"^(\d+)\t(.+)$", line)
+            if not m:
+                print(f"行格式不符，略過：{line}")
+                continue
+            file_id, text = m.group(1), m.group(2)
+            print(f"\n========== 處理：{file_id} ==========")
+            prompt = build_prompt(text)
+            response_text = call_openai(prompt)
+            if not response_text:
+                print(f"❌ OpenAI 無回應，略過：{file_id}")
+                wrong_json.write(f"{file_id}\n")
+                continue
+            parsed_json = extract_json_from_output(response_text)
+            if parsed_json is None:
+                print(f"❌ JSON 無法解析: {file_id}")
+                wrong_json.write(f"{file_id}\n")
+                continue
+            all_results[file_id] = {
+                "transcript": text,
+                "gpt_result": parsed_json
+            }
+            for category, items in parsed_json.items():
+                if category == "text" or not isinstance(items, list): continue
+                for item in items:
+                    norm_item, norm_cat = normalize_time_phrase(item, category.upper())
+                    phrase = norm_item.replace("\n", " ").strip()
+                    # 後處理
+                    phrase = filter_modifiers(phrase)
+                    if norm_cat.upper() == "FAMILYNAME":
+                        phrase = filter_family_words(phrase)
+                    if norm_cat.upper() == "DOCTOR":
+                        phrase = remove_dr_prefix(phrase)
+                    phrase = remove_title_prefix(phrase)
+                    phrase = remove_suffix(phrase)
+                    phrase = remove_possessive(phrase)
+                    out_cat = norm_cat.upper()
+                    if out_cat == "DATE":
+                        phrase = fix_date_phrase(phrase)
+                    elif out_cat == "TIME":
+                        phrase = fix_time_phrase(phrase)
+                    if not phrase: continue
+                    f2.write(f"{file_id}\t{out_cat}\t{phrase}\n")
+
+        f_json.seek(0)
+        f_json.truncate()
+        json.dump(all_results, f_json, ensure_ascii=False, indent=2)
+
+    print("✅ 處理完成，已輸出 text2.txt（標註結果）、wrong_json.txt（錯誤編號）、multi_txt_results.json")
+
+if __name__ == "__main__":
+    process_txt_file(TXT_INPUT_FILE)
