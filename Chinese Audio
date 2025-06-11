@@ -1,0 +1,96 @@
+import os
+import glob
+import whisper
+import whisperx
+import torch
+import opencc
+
+def transcribe_and_align(audio_path, model, model_size="medium", device="cpu"):
+    print(f"▶ 處理音訊檔：{audio_path}")
+
+    # Whisper 轉錄
+    result = model.transcribe(audio_path, fp16=False, word_timestamps=False)
+    text = result["text"]
+    segments = result.get("segments", [])
+    language = result.get("language", "unknown")
+    duration = segments[-1]["end"] if segments else 0
+
+    whisper_result = {
+        "segments": [{
+            "start": seg["start"],
+            "end": seg["end"],
+            "text": seg["text"]
+        } for seg in segments if seg.get("text", "").strip()],
+        "language": language
+    }
+
+    print(f"語言：{language}，總長度：{duration:.2f} 秒")
+    print("開始使用 WhisperX 對齊單字時間")
+
+    # WhisperX forced alignment
+    model_a, metadata = whisperx.load_align_model(language_code=language, device=device)
+
+    # 重新載入音訊（whisperx 需要 tensor 格式）
+    audio = whisperx.load_audio(audio_path)
+
+    # 執行 forced alignment
+    aligned_result = whisperx.align(
+        whisper_result["segments"],
+        model_a,
+        metadata,
+        audio,
+        device=device
+    )
+
+    return text, aligned_result.get("word_segments", [])
+
+def save_results_append(audio_path, whisper_text, word_segments, transcription_path, word_segments_path, converter):
+    base = os.path.splitext(os.path.basename(audio_path))[0]
+
+    # transcription_zh.txt: 檔名(tab)全文同一行，簡轉繁
+    text_trad = converter.convert(whisper_text.replace('\n', '').strip())
+    with open(transcription_path, "a", encoding="utf-8") as f:
+        f.write(f"{base}\t{text_trad}\n")
+
+    # word_segments_zh.txt: 檔名後換行，每一行 [start - end] word，簡轉繁
+    with open(word_segments_path, "a", encoding="utf-8") as f:
+        f.write(f"{base}\n")
+        for w in word_segments:
+            word = w.get("word")
+            start = w.get("start")
+            end = w.get("end")
+            if word is not None and start is not None and end is not None:
+                word_trad = converter.convert(word)
+                f.write(f"[{start:.2f} - {end:.2f}] {word_trad}\n")
+
+if __name__ == "__main__":
+    # 設定音檔資料夾
+    audio_folder = r"/content/drive/MyDrive/Private_dataset/private"
+    # 支援常見音訊格式
+    audio_extensions = ["wav", "mp3", "m4a", "flac", "ogg", "aac"]
+    audio_files = []
+    for ext in audio_extensions:
+        audio_files.extend(glob.glob(os.path.join(audio_folder, f"*.{ext}")))
+
+    if not audio_files:
+        print("❌ 沒有發現任何音訊檔！")
+        exit(1)
+
+    model_size = "large-v3"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"▶ 載入 Whisper 模型（{model_size}）")
+    model = whisper.load_model(model_size, device=device)
+
+    transcription_path = "transcription_zh.txt"
+    word_segments_path = "word_segments_zh.txt"
+    # 先清空舊檔
+    open(transcription_path, "w", encoding="utf-8").close()
+    open(word_segments_path, "w", encoding="utf-8").close()
+
+    # 初始化簡轉繁
+    converter = opencc.OpenCC('s2t')
+
+    for audio_file in audio_files:
+        whisper_text, word_segments = transcribe_and_align(audio_file, model, model_size, device)
+        save_results_append(audio_file, whisper_text, word_segments, transcription_path, word_segments_path, converter)
+        print(f"檔案 {audio_file} 處理完成，結果已輸出。")
