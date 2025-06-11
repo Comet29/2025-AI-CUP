@@ -10,7 +10,7 @@ OUT_JSON = "multi_txt_results.json"
 OUT_TEXT2 = "text2_zh.txt"
 OUT_WRONG = "wrong_json.txt"
 
-API_KEY = "My API Key"
+API_KEY = "My API KEY"
 client = openai.OpenAI(api_key=API_KEY)
 
 # ====== 規則定義 ======
