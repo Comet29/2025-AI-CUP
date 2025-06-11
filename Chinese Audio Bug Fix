@@ -1,0 +1,1 @@
+!sed -i 's/frame_emission\[tokens.clamp(min=0)\]/frame_emission[tokens.clamp(min=0).long()]/g' /usr/local/lib/python3.11/dist-packages/whisperx/alignment.py
