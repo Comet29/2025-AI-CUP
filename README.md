@@ -12,6 +12,23 @@ This program performs audio transcription with timestamp alignment and utilizes 
 Users must manually input the path to the Audio folder.
 <pre> AUDIO_FOLDER = "/content/drive/MyDrive/Private_dataset/private" </pre>
 ### Output
+The full transcript of each audio file in Traditional Chinese, one file per line. <br>
+Format: Each line contains the base filename (without extension), a tab character, and the full transcribed text in Traditional Chinese (converted from Simplified Chinese if necessary).
+<pre> transcription_zh.txt </pre>
+The word-level time alignment for each audio file, all in Traditional Chinese. <br>
+Format: For each audio file, the base filename is written on one line. The following lines list each word on a separate line, with its start and end timestamps (in seconds) and the word in Traditional Chinese.
+<pre> word_segments_zh.txt </pre>
+
+## Chinese Audio
+This program has been patched to support Chinese audio files(Chinese Audio Bug Fix), but its functionality is currently limited to transcription and timestamp alignment only.
+<pre> !pip install -q datasets openai-whisper </pre>
+<pre> !pip install whisperx </pre>
+<pre> !sed -i 's/frame_emission\[tokens.clamp(min=0)\]/frame_emission[tokens.clamp(min=0).long()]/g' /usr/local/lib/python3.11/dist-packages/whisperx/alignment.py </pre>
+<pre> !pip install opencc-python-reimplemented </pre>
+### Input
+Users must manually input the path to the Audio folder.
+<pre> audio_folder = r"/content/drive/MyDrive/Private_dataset/private" </pre>
+### Output
 Full structured results for each audio file, including transcription, time alignment, and extracted sensitive information. <br>
 Format: A JSON object where each key is the base filename (without extension) of an audio file.(gpt_result) in various categories.
 <pre> multi_audio_results.json </pre>
@@ -24,15 +41,6 @@ Format: Each line contains the base filename, the annotation category (in upperc
 List of audio files that failed to process, for troubleshooting. <br>
 Format: Each line contains the base filename (without extension) of an audio file that failed to process due to transcription errors, API errors, or JSON parsing errors.
 <pre> wrong_json.txt </pre>
-
-## Chinese Audio
-This program has been patched to support Chinese audio files(Chinese Audio Bug Fix), but its functionality is currently limited to transcription and timestamp alignment only.
-<pre> !pip install -q datasets openai-whisper </pre>
-<pre> !pip install whisperx </pre>
-<pre> !sed -i 's/frame_emission\[tokens.clamp(min=0)\]/frame_emission[tokens.clamp(min=0).long()]/g' /usr/local/lib/python3.11/dist-packages/whisperx/alignment.py </pre>
-<pre> !pip install opencc-python-reimplemented </pre>
-
-
 
 ## Chinese SHI
 This program extracts SHI from text.
