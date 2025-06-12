@@ -21,7 +21,7 @@ This program extracts SHI from text.
 <pre> !pip install openai </pre>
 ### Input
 Users must manually input the path to the text file (.txt).
-Format: Each line contains an integer index, followed by a tab character, then a Chinese sentence to be processed.
+Format: Each line contains an integer index, followed by a tab character, then a Chinese sentence to be processed.</be>
 <pre> TXT_INPUT_FILE = "/content/transcription_zh.txt" </pre>
 ### Output
 Structured extraction results for each input line.
