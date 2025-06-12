@@ -24,7 +24,7 @@ Users must manually input the path to the text file (.txt).
 Format: Each line contains an integer index, followed by a tab character, then a Chinese sentence to be processed.</be>
 <pre> TXT_INPUT_FILE = "/content/transcription_zh.txt" </pre>
 ### Output
-Structured extraction results for each input line.
+Structured extraction results for each input line. <br>
 Format: A JSON object where each key is the line index from the input file. Each entry contains the original sentence (transcript) and the extracted structured results (gpt_result) in various categories.
 <pre> OUT_JSON = "multi_txt_results.json" </pre>
 Tab-delimited, line-by-line annotated SHI phrases.
